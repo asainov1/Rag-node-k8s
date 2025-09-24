@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: gateway-py
+spec:
+  replicas: 2
+  strategy:
+    canary:
+      steps:
+        - setWeight: 20
+        - pause: {duration: 60}
+        - analysis:
+            templates:
+            - templateName: p95-latency-check
+            args:
+            - name: threshold
+              value: "2"  # seconds
+        - setWeight: 60
+        - pause: {duration: 60}
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels: { app: gateway-py }
+  template:
+    metadata:
+      labels: { app: gateway-py }
+    spec:
+      containers:
+        - name: app
+          image: ghcr.io/YOUR_USER/gateway-py:sha-REPLACE
+          ports: [{ containerPort: 8080 }]
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5

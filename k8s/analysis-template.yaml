@@ -1,0 +1,17 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: p95-latency-check
+spec:
+  args:
+    - name: threshold
+  metrics:
+  - name: p95-latency
+    interval: 30s
+    count: 3
+    successCondition: result < args.threshold
+    provider:
+      prometheus:
+        address: http://prometheus-server.prometheus.svc.cluster.local
+        query: |
+          histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le))

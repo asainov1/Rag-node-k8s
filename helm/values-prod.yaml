@@ -1,0 +1,21 @@
+image:
+  repository: ghcr.io/YOUR_USER/gateway-py
+  tag: "sha-REPLACE"
+
+replicaCount: 2
+
+env:
+  QDRANT_URL: "http://qdrant:6333"
+  QDRANT_COLLECTION: "moderation"
+  REDIS_URL: "redis://redis:6379/0"
+  SLO_P95_E2E_SEC: "2.5"
+  ENABLE_TRACING: "false"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"

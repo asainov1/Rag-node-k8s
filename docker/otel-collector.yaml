@@ -1,0 +1,20 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+exporters:
+  logging:
+    logLevel: info
+  prometheus:
+    endpoint: "0.0.0.0:9464"
+processors:
+  batch: {}
+extensions:
+  health_check: {}
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging]

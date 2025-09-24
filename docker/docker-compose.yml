@@ -1,0 +1,28 @@
+version: "3.9"
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports: ["6333:6333"]
+    volumes: ["qdrant_storage:/qdrant/storage"]
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports: ["9090:9090"]
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3000:3000"]
+  gateway:
+    build: ../app
+    image: ghcr.io/YOUR_USER/gateway-py:dev
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: moderation
+      REDIS_URL: redis://redis:6379/0
+    ports: ["8080:8080"]
+    depends_on: [qdrant, redis, prometheus]
+volumes:
+  qdrant_storage:

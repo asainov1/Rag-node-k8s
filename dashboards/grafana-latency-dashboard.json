@@ -1,0 +1,42 @@
+{
+  "title": "Gateway PY \u2014 Latency & Cache",
+  "panels": [
+    {
+      "type": "graph",
+      "title": "HTTP p95",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le))"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "HTTP p99",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le))"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Redis hit-rate",
+      "targets": [
+        {
+          "expr": "sum(rate(reranker_cache_hit_total[5m])) / clamp_min(sum(rate(reranker_cache_hit_total[5m])) + sum(rate(reranker_cache_miss_total[5m])), 1)"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "In-flight",
+      "targets": [
+        {
+          "expr": "sum(inflight_requests)"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 37
+}
