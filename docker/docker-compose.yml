@@ -1,28 +1,54 @@
-version: "3.9"
+# docker/docker-compose.yml
 services:
   qdrant:
     image: qdrant/qdrant:latest
     ports: ["6333:6333"]
-    volumes: ["qdrant_storage:/qdrant/storage"]
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
   redis:
     image: redis:7
     ports: ["6379:6379"]
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:latest
+    ports: ["9090:9090"]
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
-    ports: ["9090:9090"]
+      - prom_data:/prometheus
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:latest
     ports: ["3000:3000"]
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+
   gateway:
     build: ../app
-    image: ghcr.io/YOUR_USER/gateway-py:dev
+    ports: ["8080:8080"]
+    env_file:
+      - ./gateway.env          # keep secrets here (not in git)
     environment:
+      ORT_LOG_SEVERITY_LEVEL: "3"
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: moderation
       REDIS_URL: redis://redis:6379/0
-    ports: ["8080:8080"]
+      CACHE_TTL: "300"
+      RATE_LIMIT_PER_MIN: "120"
+      MAX_REQUEST_BYTES: "2000000"
     depends_on: [qdrant, redis, prometheus]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
 volumes:
   qdrant_storage:
+  grafana_data:
+  prom_data:

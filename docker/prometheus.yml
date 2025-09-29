@@ -1,6 +1,13 @@
 global:
   scrape_interval: 5s
+
 scrape_configs:
-  - job_name: 'gateway-py'
+  - job_name: "gateway"
+    metrics_path: /metrics
     static_configs:
-      - targets: ['gateway:8080']
+      - targets: ["gateway:8080"]   # service name + port inside the compose network
+
+  # optional: Prometheus scrapes itself
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
