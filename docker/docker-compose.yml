@@ -38,7 +38,7 @@ services:
       QDRANT_COLLECTION: moderation
       REDIS_URL: redis://redis:6379/0
       CACHE_TTL: "300"
-      RATE_LIMIT_PER_MIN: "120"
+      RATE_LIMIT_PER_MIN: "100000"
       MAX_REQUEST_BYTES: "2000000"
     depends_on: [qdrant, redis, prometheus]
     restart: unless-stopped

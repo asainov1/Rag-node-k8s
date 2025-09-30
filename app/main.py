@@ -28,7 +28,6 @@ r = redis.Redis.from_url(settings.redis_url)
 qdr = QdrantClient(url=settings.qdrant_url, timeout=2.0)
 app = FastAPI(title="gateway-py")
 
-
 # ---------- optional LLM client ----------
 try:
     from openai import OpenAI
@@ -62,21 +61,42 @@ async def _limit_request_size(request: Request, call_next):
         pass
     return await call_next(request)
 
-# ---------- embedder (384-dim, CPU-friendly) ----------
+# ---------- embedder (multilingual default, 384-dim) ----------
 os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")  # silence ONNX warnings
-embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")  # 384-dim
+_EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+try:
+    embedder = TextEmbedding(model_name=_EMBED_MODEL)  # try multilingual first
+    log.info("Using embed model: %s", _EMBED_MODEL)
+except Exception as e:
+    _FALLBACK_MODEL = "BAAI/bge-small-en-v1.5"  # 384-dim
+    log.warning("Embed model %s not available (%s). Falling back to %s",
+                _EMBED_MODEL, e, _FALLBACK_MODEL)
+    embedder = TextEmbedding(model_name=_FALLBACK_MODEL)
+    log.info("Using embed model: %s", _FALLBACK_MODEL)
 
 # ---------- models ----------
 class RagQuery(BaseModel):
     q: str = Field("test", min_length=1, max_length=2000)
     k: int = Field(50, ge=1, le=200)
-    rerank: bool = False   # enable LLM reranking per request
+    rerank: bool = False
+    # NEW: optional filters
+    lower_cat: Optional[str] = None
+    brand: Optional[str] = None
+    color: Optional[str] = None
 
 class IngestItem(BaseModel):
     id: int
     text: str
     title: Optional[str] = None
     url: Optional[str] = None
+    # NEW: structured fields
+    parent_cat: Optional[str] = None
+    lower_cat: Optional[str] = None
+    brand: Optional[str] = None
+    color: Optional[str] = None
+
+class IngestBatch(BaseModel):
+    items: List[IngestItem]
 
 class AnswerQuery(BaseModel):
     q: str = Field(..., min_length=1, max_length=2000)
@@ -128,7 +148,6 @@ def rate_limit(request: Request):
 
 # --------- chunking ----------
 def simple_chunks(text: str, max_len: int = 800, overlap: int = 160):
-    """Split text to word chunks with overlap."""
     words = text.split()
     i = 0
     while i < len(words):
@@ -138,18 +157,18 @@ def simple_chunks(text: str, max_len: int = 800, overlap: int = 160):
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.1, min=0.2, max=1.0),
        retry=retry_if_exception_type(Exception))
-def qdrant_search(vec: List[float], k: int):
-    return qdr.search(collection_name=settings.qdrant_collection, query_vector=list(vec), limit=k)
+def qdrant_search(vec: List[float], k: int, flt: Optional[qm.Filter] = None):
+    return qdr.search(
+        collection_name=settings.qdrant_collection,
+        query_vector=list(vec),
+        limit=k,
+        query_filter=flt
+    )
 
 # --------- LLM reranker ----------
 def llm_rerank(query: str, hits: List[dict]) -> List[dict]:
-    """
-    Ask an LLM to score each passage 0-10 for relevance and reorder.
-    Falls back gracefully if OPENAI_API_KEY is not set or call fails.
-    """
     if not _openai or not hits:
         return hits
-
     passages = [h.get("text", "") for h in hits]
     prompt = {
         "role": "user",
@@ -160,7 +179,6 @@ def llm_rerank(query: str, hits: List[dict]) -> List[dict]:
             "\n".join([f"[{i}] {p}" for i, p in enumerate(passages)])
         ),
     }
-
     try:
         resp = _openai.chat.completions.create(
             model="gpt-4o-mini",
@@ -177,7 +195,6 @@ def llm_rerank(query: str, hits: List[dict]) -> List[dict]:
             h["reranked"] = True
     except Exception as e:
         log.warning("LLM rerank failed: %s", e)
-
     return hits
 
 # ---------- routes ----------
@@ -193,14 +210,13 @@ def metrics():
 @app.post("/ingest")
 def ingest(item: IngestItem, _: None = Depends(require_api_key), __: None = Depends(rate_limit)):
     try:
-        # Chunk → embed batch → upsert each chunk with metadata
         chunks = list(simple_chunks(item.text, max_len=800, overlap=160)) or [item.text]
         vecs = list(embedder.embed(chunks))
         points = []
         for i, (chunk, vec) in enumerate(zip(chunks, vecs)):
             points.append(
                 qm.PointStruct(
-                    id=f"{item.id}:{i}",
+                    id=item.id * 1000 + i,     # numeric id per chunk
                     vector=list(vec),
                     payload={
                         "doc_id": item.id,
@@ -208,14 +224,53 @@ def ingest(item: IngestItem, _: None = Depends(require_api_key), __: None = Depe
                         "text": chunk,
                         **({"title": item.title} if item.title else {}),
                         **({"url": item.url} if item.url else {}),
+                        # NEW structured payload fields
+                        **({"parent_cat": item.parent_cat} if item.parent_cat else {}),
+                        **({"lower_cat": item.lower_cat} if item.lower_cat else {}),
+                        **({"brand": item.brand} if item.brand else {}),
+                        **({"color": item.color} if item.color else {}),
                     },
                 )
             )
         qdr.upsert(collection_name=settings.qdrant_collection, points=points, wait=True)
-        r.incr("rag:collection_version")  # invalidate old cache
+        r.incr("rag:collection_version")
         return {"ok": True, "doc_id": item.id, "chunks": len(points)}
     except Exception as e:
         log.exception("ingest failed: %s", e)
+        raise HTTPException(status_code=500, detail="ingest_failed")
+
+@app.post("/ingest_batch")
+def ingest_batch(body: IngestBatch, _: None = Depends(require_api_key)):
+    try:
+        points: List[qm.PointStruct] = []
+        for item in body.items:
+            chunks = list(simple_chunks(item.text, max_len=800, overlap=160)) or [item.text]
+            vecs = list(embedder.embed(chunks))
+            for i, (chunk, vec) in enumerate(zip(chunks, vecs)):
+                points.append(
+                    qm.PointStruct(
+                        id=item.id * 1000 + i,
+                        vector=list(vec),
+                        payload={
+                            "doc_id": item.id,
+                            "chunk": i,
+                            "text": chunk,
+                            **({"title": item.title} if item.title else {}),
+                            **({"url": item.url} if item.url else {}),
+                            # NEW structured payload fields
+                            **({"parent_cat": item.parent_cat} if item.parent_cat else {}),
+                            **({"lower_cat": item.lower_cat} if item.lower_cat else {}),
+                            **({"brand": item.brand} if item.brand else {}),
+                            **({"color": item.color} if item.color else {}),
+                        },
+                    )
+                )
+        if points:
+            qdr.upsert(collection_name=settings.qdrant_collection, points=points, wait=True)
+            r.incr("rag:collection_version")
+        return {"ok": True, "docs": len(body.items), "points": len(points)}
+    except Exception as e:
+        log.exception("ingest_batch failed: %s", e)
         raise HTTPException(status_code=500, detail="ingest_failed")
 
 @app.post("/rag")
@@ -225,9 +280,8 @@ async def rag(body: RagQuery, _: None = Depends(require_api_key), __: None = Dep
     status = "200"
     INFLIGHT.labels(route=route).inc()
     try:
-        key = _cache_key(body.q, body.k, body.rerank)
+        key = _cache_key(body.q, body.k, body.rerank) + f"|{body.lower_cat}|{body.brand}|{body.color}"
 
-        # Circuit-open: try cache or 503
         if not circuit_allowed():
             cached = r.get(key)
             if cached:
@@ -236,17 +290,26 @@ async def rag(body: RagQuery, _: None = Depends(require_api_key), __: None = Dep
             status = "503"
             return JSONResponse({"error": "circuit_open"}, status_code=503)
 
-        # Cache first
         cached = r.get(key)
         if cached:
             CACHE_HIT.inc(); status = "200"
             return JSONResponse(json.loads(cached))
 
-        # Miss → embed → search
         CACHE_MISS.inc()
         vec = next(embedder.embed([body.q]))
+
+        # NEW: build an optional filter
+        must = []
+        if body.lower_cat:
+            must.append(qm.FieldCondition(key="lower_cat", match=qm.MatchValue(value=body.lower_cat)))
+        if body.brand:
+            must.append(qm.FieldCondition(key="brand", match=qm.MatchValue(value=body.brand)))
+        if body.color:
+            must.append(qm.FieldCondition(key="color", match=qm.MatchValue(value=body.color)))
+        flt = qm.Filter(must=must) if must else None
+
         try:
-            res = qdrant_search(vec, body.k); circuit_close()
+            res = qdrant_search(vec, body.k, flt); circuit_close()
         except Exception as e:
             QDRANT_ERRORS.inc(); log.warning("qdrant error: %s", e); circuit_trip(5.0)
             c2 = r.get(key)
@@ -270,7 +333,6 @@ async def rag(body: RagQuery, _: None = Depends(require_api_key), __: None = Dep
             for i, p in enumerate(res)
         ]
 
-        # Optional LLM reranking
         if body.rerank:
             hits = llm_rerank(body.q, hits)
 
@@ -290,7 +352,6 @@ async def rag(body: RagQuery, _: None = Depends(require_api_key), __: None = Dep
 
 @app.post("/answer")
 def answer(body: AnswerQuery, _: None = Depends(require_api_key), __: None = Depends(rate_limit)):
-    """G-step: retrieve → optional rerank → LLM answer (fallback to extractive stub)."""
     vec = next(embedder.embed([body.q]))
     res = qdr.search(collection_name=settings.qdrant_collection, query_vector=list(vec), limit=body.k)
     hits = [
@@ -306,7 +367,6 @@ def answer(body: AnswerQuery, _: None = Depends(require_api_key), __: None = Dep
         }
         for i, p in enumerate(res)
     ]
-
     if body.rerank:
         hits = llm_rerank(body.q, hits)
 
